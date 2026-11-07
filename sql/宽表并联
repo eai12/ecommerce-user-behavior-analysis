@@ -1,0 +1,103 @@
+DROP TABLE IF EXISTS dwd_user_behavior;
+CREATE TABLE dwd_user_behavior AS
+SELECT
+    -- 用户
+    u.user_id                                     AS `用户ID`,
+    u.sex                                         AS `性别`,
+    f.face                                        AS `人群标签`,
+    u.address                                     AS `城市`,
+    u.device                                      AS `手机品牌`,
+    u.cluster                                     AS `分群编号`,
+    u.user_type_label                             AS `分群名称`,
+    -- 商品 / 类目
+    u.goods_id                                    AS `商品ID`,
+    g.goods_name                                  AS `商品名称`,
+    g.goods_cnt                                   AS `商品累计行为数`,
+    gc.goods_category_cnt                         AS `商品所属类目数`,
+    u.category_id                                 AS `类目ID`,
+    c.category_label                              AS `类目名称`,
+    c.category_base                               AS `基础品类`,
+    c.category_cnt                                AS `类目累计行为数`,
+    -- 行为
+    u.behavior                                    AS `行为类型`,
+    CASE u.behavior
+        WHEN 'pv'   THEN '浏览'
+        WHEN 'cart' THEN '加购'
+        WHEN 'fav'  THEN '收藏'
+        WHEN 'buy'  THEN '购买'
+        ELSE u.behavior
+    END                                           AS `行为名称`,
+    CASE WHEN u.behavior = 'buy' THEN 1 ELSE 0 END AS `是否购买`,
+    u.pv_count                                    AS `浏览标记`,
+    u.cart_count                                  AS `加购标记`,
+    u.fav_count                                   AS `收藏标记`,
+    u.buy_count                                   AS `购买标记`,
+    -- 时间
+    u.ts_sec                                      AS `时间戳`,
+    u.`time`                                      AS `行为时间`,
+    u.`date`                                      AS `日期`,
+    u.`hour`                                      AS `小时`,
+    CASE DATE_FORMAT(u.`date`, '%w')
+        WHEN '1' THEN '周一' WHEN '2' THEN '周二' WHEN '3' THEN '周三'
+        WHEN '4' THEN '周四' WHEN '5' THEN '周五' WHEN '6' THEN '周六'
+        ELSE '周日'
+    END                                           AS `星期`,
+    CASE WHEN DATE_FORMAT(u.`date`, '%w') IN ('0','6')
+         THEN '周末' ELSE '工作日' END             AS `是否周末`,
+    -- 金额（price/amount 是均匀分布的仿真值，勿作真实营收）
+    u.price                                       AS `成交单价`,
+    CAST(u.amount AS SIGNED)                      AS `购买件数`,
+    ROUND(u.price * u.amount, 2)                  AS `成交金额`,
+    -- 文本 / 质量
+    u.`comment`                                   AS `评论内容`,
+    COALESCE(cm.comment_cnt, 0)                   AS `同商品评论次数`,
+    CASE WHEN ROW_NUMBER() OVER (
+              PARTITION BY u.user_id, u.goods_id, u.behavior, u.ts_sec
+              ORDER BY u.user_id
+         ) > 1 THEN 1 ELSE 0 END                  AS `是否重复行`
+FROM (
+    SELECT u.*,
+           CAST(ROUND(CAST(u.`timestamp` AS DECIMAL(20,3)), 0) AS SIGNED) AS ts_sec
+    FROM ub_labels u
+    WHERE u.`timestamp` IS NOT NULL
+      AND u.`date`       IS NOT NULL
+) u
+-- 用户画像：1 用户 1 行 + 去尾部空格
+LEFT JOIN (
+    SELECT user_id, MIN(TRIM(face)) AS face
+    FROM user_face
+    GROUP BY user_id
+) f ON u.user_id = f.user_id
+-- 类目：1 类目 1 
+LEFT JOIN (
+    SELECT category_id,
+           MIN(category_label) AS category_label,
+           MIN(category_count) AS category_cnt,
+           MIN(CASE
+                 WHEN INSTR(category_label,'（') > 0
+                   THEN SUBSTR(category_label, 1, INSTR(category_label,'（') - 1)
+                 WHEN INSTR(category_label,'(')  > 0
+                   THEN SUBSTR(category_label, 1, INSTR(category_label,'(')  - 1)
+                 ELSE category_label
+               END) AS category_base
+    FROM category_mapping
+    GROUP BY category_id
+) c ON u.category_id = c.category_id
+-- 商品：1 商品 1 行
+LEFT JOIN (
+    SELECT goods_id, MAX(goods_count) AS goods_cnt, MAX(goods_name) AS goods_name
+    FROM goods_mapping
+    GROUP BY goods_id
+) g ON u.goods_id = g.goods_id
+-- 商品-类目
+LEFT JOIN (
+    SELECT goods_id, COUNT(*) AS goods_category_cnt
+    FROM goods_category_count
+    GROUP BY goods_id
+) gc ON u.goods_id = gc.goods_id
+-- 评论：聚合到 (用户,商品)，只取次数
+LEFT JOIN (
+    SELECT user_id, goods_id, COUNT(*) AS comment_cnt
+    FROM user_comments
+    GROUP BY user_id, goods_id
+) cm ON u.user_id = cm.user_id AND u.goods_id = cm.goods_id;
